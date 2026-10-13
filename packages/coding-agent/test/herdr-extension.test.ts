@@ -116,9 +116,21 @@ describe("Herdr extension", () => {
 	test("reports the session, its resume command, and each state change", async () => {
 		const run = await startedInHerdr();
 		await until(() => run.states().length === 1);
-		expect(run.herdr.requests[0].params).toMatchObject({
+		// Herdr applies the state report only once the session is anchored, so the session report comes first.
+		expect(run.herdr.requests[0]).toMatchObject({
+			method: "pane.report_agent_session",
+			params: {
+				pane_id: "w1:p2",
+				source: "herdr:pi-bolt",
+				agent: "pi-bolt",
+				session_start_source: "startup",
+				agent_session_path: "/work/s.jsonl",
+				resume_argv: [COMMAND_NAME, "--session", "/work/s.jsonl"],
+			},
+		});
+		expect(run.herdr.requests[1].params).toMatchObject({
 			pane_id: "w1:p2",
-			source: "pi-bolt",
+			source: "herdr:pi-bolt",
 			agent: "pi-bolt",
 			state: "idle",
 			agent_session_path: "/work/s.jsonl",
@@ -143,6 +155,39 @@ describe("Herdr extension", () => {
 		expect(new Set(seqs).size).toBe(seqs.length);
 	});
 
+	test("a session that opens or changes is reported to Herdr again, before the state", async () => {
+		const run = await startedInHerdr();
+		await until(() => run.states().length === 1);
+		run.setIdle(false);
+		await run.fire("agent_start", { type: "agent_start" }, run.ctx);
+		await until(() => run.states().length === 2);
+		await run.fire("session_start", { type: "session_start", reason: "resume" }, run.ctx);
+		await until(() => run.states().length === 3);
+		expect(run.herdr.requests.map((r) => r.method)).toEqual([
+			"pane.report_agent_session",
+			"pane.report_agent",
+			"pane.report_agent_session",
+			"pane.report_agent",
+			"pane.report_agent_session",
+			"pane.report_agent",
+		]);
+		expect(run.herdr.requests.map((r) => r.params.session_start_source).filter(Boolean)).toEqual([
+			"startup",
+			"startup",
+			"resume",
+		]);
+		const seqs = run.herdr.requests.map((r) => r.params.seq as number);
+		expect([...seqs].sort((a, b) => a - b)).toEqual(seqs);
+		expect(new Set(seqs).size).toBe(seqs.length);
+	});
+
+	test("a session known only by its id is reported by id", async () => {
+		const run = await startedInHerdr({ sessionFile: "relative.jsonl" });
+		await until(() => run.states().length === 1);
+		expect(run.herdr.requests[0].params).toMatchObject({ agent_session_id: "session-id" });
+		expect(run.herdr.requests[0].params.agent_session_path).toBeUndefined();
+	});
+
 	test("a dialog opened at the prompt is not a block", async () => {
 		const run = await startedInHerdr();
 		await until(() => run.states().length === 1);
@@ -156,7 +201,10 @@ describe("Herdr extension", () => {
 		await until(() => run.states().length === 1);
 		run.emit("herdr:blocked", { active: true, label: "Question for you" });
 		await until(() => run.states().length === 2);
-		expect(run.herdr.requests[1].params).toMatchObject({ state: "blocked", message: "Question for you" });
+		expect(run.herdr.requests.filter((r) => r.method === "pane.report_agent")[1].params).toMatchObject({
+			state: "blocked",
+			message: "Question for you",
+		});
 		run.emit("herdr:blocked", { active: false });
 		await until(() => run.states().length === 3);
 
@@ -178,15 +226,15 @@ describe("Herdr extension", () => {
 		const run = await startedInHerdr();
 		await until(() => run.states().length === 1);
 		await run.fire("session_shutdown", { type: "session_shutdown", reason: "new" });
-		expect(run.herdr.requests.map((r) => r.method)).toEqual(["pane.report_agent"]);
+		expect(run.herdr.requests.map((r) => r.method)).toEqual(["pane.report_agent_session", "pane.report_agent"]);
 
 		const quitting = await startedInHerdr();
 		await until(() => quitting.states().length === 1);
 		await quitting.fire("session_shutdown", { type: "session_shutdown", reason: "quit" });
-		await until(() => quitting.herdr.requests.length === 2);
-		expect(quitting.herdr.requests[1]).toMatchObject({
+		await until(() => quitting.herdr.requests.length === 3);
+		expect(quitting.herdr.requests[2]).toMatchObject({
 			method: "pane.release_agent",
-			params: { pane_id: "w1:p2", source: "pi-bolt", agent: "pi-bolt" },
+			params: { pane_id: "w1:p2", source: "herdr:pi-bolt", agent: "pi-bolt" },
 		});
 	});
 
@@ -228,7 +276,7 @@ describe("Herdr executable (Windows)", () => {
 				method: "pane.report_agent",
 				params: {
 					pane_id: "w1:p2",
-					source: "pi-bolt",
+					source: "herdr:pi-bolt",
 					agent: "pi-bolt",
 					state: "blocked",
 					message: "-y to continue?",
@@ -242,7 +290,7 @@ describe("Herdr executable (Windows)", () => {
 			"report-agent",
 			"w1:p2",
 			"--source",
-			"pi-bolt",
+			"herdr:pi-bolt",
 			"--agent",
 			"pi-bolt",
 			"--seq",
@@ -261,9 +309,9 @@ describe("Herdr executable (Windows)", () => {
 		expect(
 			herdrArguments({
 				method: "pane.release_agent",
-				params: { pane_id: "w1:p2", source: "pi-bolt", agent: "pi-bolt", seq: 8 },
+				params: { pane_id: "w1:p2", source: "herdr:pi-bolt", agent: "pi-bolt", seq: 8 },
 			}),
-		).toEqual(["pane", "release-agent", "w1:p2", "--source", "pi-bolt", "--agent", "pi-bolt", "--seq", "8"]);
+		).toEqual(["pane", "release-agent", "w1:p2", "--source", "herdr:pi-bolt", "--agent", "pi-bolt", "--seq", "8"]);
 	});
 
 	test.skipIf(process.platform === "win32")("on Windows, reports run HERDR_BIN_PATH", async () => {
@@ -282,15 +330,20 @@ describe("Herdr executable (Windows)", () => {
 			context({ sessionFile: "/w/s.jsonl" }),
 		);
 		const calls = () => (existsSync(log) ? readFileSync(log, "utf8").trim().split("\n") : []);
-		await until(() => calls().length === 1);
-		await fake.fire("session_shutdown", { type: "session_shutdown", reason: "quit" });
 		await until(() => calls().length === 2);
+		await fake.fire("session_shutdown", { type: "session_shutdown", reason: "quit" });
+		await until(() => calls().length === 3);
 		expect(calls()[0]).toMatch(
 			new RegExp(
-				`^pane\\|report-agent\\|w1:p2\\|--source\\|pi-bolt\\|--agent\\|pi-bolt\\|--seq\\|\\d+\\|--state\\|idle\\|--agent-session-path\\|/w/s.jsonl\\|--\\|${COMMAND_NAME}\\|--session\\|/w/s.jsonl$`,
+				`^pane\\|report-agent-session\\|w1:p2\\|--source\\|herdr:pi-bolt\\|--agent\\|pi-bolt\\|--seq\\|\\d+\\|--session-start-source\\|startup\\|--agent-session-path\\|/w/s.jsonl\\|--\\|${COMMAND_NAME}\\|--session\\|/w/s.jsonl$`,
 			),
 		);
-		expect(calls()[1]).toMatch(/^pane\|release-agent\|w1:p2\|--source\|pi-bolt\|--agent\|pi-bolt\|--seq\|\d+$/);
+		expect(calls()[1]).toMatch(
+			new RegExp(
+				`^pane\\|report-agent\\|w1:p2\\|--source\\|herdr:pi-bolt\\|--agent\\|pi-bolt\\|--seq\\|\\d+\\|--state\\|idle\\|--agent-session-path\\|/w/s.jsonl\\|--\\|${COMMAND_NAME}\\|--session\\|/w/s.jsonl$`,
+			),
+		);
+		expect(calls()[2]).toMatch(/^pane\|release-agent\|w1:p2\|--source\|herdr:pi-bolt\|--agent\|pi-bolt\|--seq\|\d+$/);
 	});
 });
 
