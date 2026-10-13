@@ -22,6 +22,19 @@ export type HerdrRequest =
 				resume_argv?: string[];
 			};
 	  }
+	| {
+			method: "pane.report_agent_session";
+			params: {
+				pane_id: string;
+				source: string;
+				agent: string;
+				seq: number;
+				session_start_source: string;
+				agent_session_path?: string;
+				agent_session_id?: string;
+				resume_argv?: string[];
+			};
+	  }
 	| { method: "pane.release_agent"; params: { pane_id: string; source: string; agent: string; seq: number } };
 
 /**
@@ -110,7 +123,7 @@ export function executableTransport(bin: string): HerdrTransport {
 }
 
 /**
- * The `herdr pane report-agent` / `pane release-agent` arguments of a request, in the form Herdr's guide uses: the pane
+ * The `herdr pane report-agent` / `pane report-agent-session` / `pane release-agent` arguments of a request, in the form Herdr's guide uses: the pane
  * first, then `--name value` pairs (release-agent takes no other form). Each value is the argument after its option, so a
  * message that starts with `-` stays a value.
  */
@@ -118,6 +131,20 @@ export function herdrArguments(request: HerdrRequest): string[] {
 	const { pane_id, source, agent, seq } = request.params;
 	const common = ["--source", source, "--agent", agent, "--seq", String(seq)];
 	if (request.method === "pane.release_agent") return ["pane", "release-agent", pane_id, ...common];
+	if (request.method === "pane.report_agent_session") {
+		const { session_start_source, agent_session_path, agent_session_id, resume_argv } = request.params;
+		return [
+			"pane",
+			"report-agent-session",
+			pane_id,
+			...common,
+			"--session-start-source",
+			session_start_source,
+			...(agent_session_path ? ["--agent-session-path", agent_session_path] : []),
+			...(agent_session_id ? ["--agent-session-id", agent_session_id] : []),
+			...(resume_argv ? ["--", ...resume_argv] : []),
+		];
+	}
 	const { state, message, agent_session_path, agent_session_id, resume_argv } = request.params;
 	return [
 		"pane",

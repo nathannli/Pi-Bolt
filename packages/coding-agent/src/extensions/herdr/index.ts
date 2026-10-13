@@ -19,7 +19,7 @@ import { COMMAND_NAME } from "../../config.ts";
 import type { ExtensionContext, ExtensionFactory } from "../../core/extensions/types.ts";
 import { type HerdrRequest, type HerdrTransport, herdrFromEnvironment } from "./transport.ts";
 
-const SOURCE = "pi-bolt";
+const SOURCE = "herdr:pi-bolt";
 const AGENT = "pi-bolt";
 
 type AgentState = "working" | "blocked" | "idle";
@@ -105,21 +105,44 @@ export function createHerdrExtension(
 			return { state: "idle" };
 		}
 
-		// One report in flight at a time; only the newest waiting one is sent.
+		// One report in flight at a time; only the newest waiting one is sent. A session report goes out before the state
+		// report queued after it: Herdr applies a state report only once the session is anchored.
 		let inFlight = false;
+		let queuedSession: HerdrRequest | undefined;
 		let queued: HerdrRequest | undefined;
 		async function drain() {
 			if (inFlight) return;
 			inFlight = true;
 			try {
-				while (queued) {
-					const request = queued;
-					queued = undefined;
+				while (queuedSession || queued) {
+					const request = queuedSession ?? queued;
+					if (!request) break;
+					if (queuedSession) queuedSession = undefined;
+					else queued = undefined;
 					await send(transport, request);
 				}
 			} finally {
 				inFlight = false;
 			}
+		}
+
+		/** Tells Herdr which session this pane's agent has opened (Herdr's `pane.report_agent_session`). */
+		function reportSession(sessionStartSource: string) {
+			if (!sessionFile && !sessionId) return;
+			const argv = resumeArgv(sessionFile);
+			queuedSession = {
+				method: "pane.report_agent_session",
+				params: {
+					pane_id: paneId,
+					source: SOURCE,
+					agent: AGENT,
+					seq: nextSeq(),
+					session_start_source: sessionStartSource,
+					...(sessionFile ? { agent_session_path: sessionFile } : { agent_session_id: sessionId }),
+					...(argv ? { resume_argv: argv } : {}),
+				},
+			};
+			void drain();
 		}
 
 		function publish(force = false) {
@@ -156,10 +179,11 @@ export function createHerdrExtension(
 			void drain();
 		}
 
-		pi.on("session_start", (_event, ctx) => {
+		pi.on("session_start", (event, ctx) => {
 			if (ctx.mode !== "tui") return;
 			reporting = true;
 			updateSession(ctx);
+			reportSession(event.reason);
 			// A reload replaces this extension in the middle of a run without another agent_start.
 			agentActive = ctx.isIdle() === false;
 			publish(true);
@@ -168,6 +192,7 @@ export function createHerdrExtension(
 		pi.on("agent_start", (_event, ctx) => {
 			if (!reporting) return;
 			updateSession(ctx);
+			reportSession("startup");
 			agentActive = true;
 			publish();
 		});
@@ -217,6 +242,7 @@ export function createHerdrExtension(
 			reporting = false;
 			// Another session in this process (new, resume, fork) or a reload reports again from its session_start.
 			if (event.reason !== "quit") return;
+			queuedSession = undefined;
 			queued = undefined;
 			// One short try: Herdr also notices the exit once the pane is back at its shell prompt.
 			await transport(
